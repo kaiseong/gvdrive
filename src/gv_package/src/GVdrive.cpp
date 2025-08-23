@@ -194,19 +194,34 @@ namespace GVTerrain::robot {
 
   bool GVdrive::startEthercat() {
     ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE);
-    ec_config_overlap_map(&IOmap_);
-    ec_configdc();
-    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
+    if (ec_config_map(&IOmap_)<=0){
+      std::cerr << "[EC] ec_config_map failed" << std::endl;
+      return false;
+    }
+
+    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE*8);
+
+    for (int i = 1; i<=ec_slavecount; i++){
+      printf("[EC] S%d Ibytes=%d Obytes=%d\n", i, ec_slave[i].Ibytes, ec_slave[i].Obytes);
+    }
     
+    ec_readstate();
+    for (int i = 1; i <= ec_slavecount; ++i) {
+      printf("[EC] slave %d state=0x%02X AL=0x%04X\n",i, ec_slave[i].state, ec_slave[i].ALstatuscode);
+  }
+
     ec_slave[0].state = EC_STATE_OPERATIONAL;
-    ec_send_overlap_processdata();
+    ec_send_processdata();
     ec_receive_processdata(EC_TIMEOUTRET);
     ec_writestate(0);
+
+
+
     //////////// wait for all slaves to reach OP state ////////////////////////////
     uint8_t count = 5;
     uint16_t timeout = 50000;
     do {
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       ec_statecheck(0, EC_STATE_OPERATIONAL, timeout);
     } while (count-- && (ec_slave[0].state != EC_STATE_OPERATIONAL));
@@ -272,7 +287,7 @@ namespace GVTerrain::robot {
     bool noErrorForAllSlaves;
     int faultClearCnt = 100;
     do {
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       noErrorForAllSlaves = true;
       for (uint8_t i = 3; i <= ec_slavecount; i++) {
@@ -330,7 +345,7 @@ namespace GVTerrain::robot {
     }
 
     if(GVdrive::mode == CONTROL){
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
 
       if (workCount == (slaveCount-2) * 3) {
@@ -375,7 +390,7 @@ namespace GVTerrain::robot {
     const int max_stop_iter = 100;
     uint8_t stop_cnt = 0; 
     while ( !slave_state && stop_cnt < max_stop_iter) {
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       slave_state = true;
       for (uint8_t i = 3; i <= ec_slavecount; ++i) {
@@ -481,7 +496,7 @@ namespace GVTerrain::robot {
     }
 
     {
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
             
       if (workCount == (slaveCount-2) * 3) {
@@ -676,7 +691,7 @@ namespace GVTerrain::robot {
       }
 
     
-      ec_send_overlap_processdata();
+      ec_send_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
 
     if (workCount == (slaveCount-2) * 3) {
