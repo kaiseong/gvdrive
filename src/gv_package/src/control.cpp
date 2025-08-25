@@ -34,26 +34,17 @@ int main(int argc, char* argv[])
     /*********** user code start *************/
     uint16_t cnt=0;
     while (gvdrive.runEtherCatLoop) {
-        if(cnt > 10000)
+        if(cnt > 2000)
             break;
-        // Impedance & Position Control
-        gvdrive.setTargetPosition("LW", 100); // unit: rad
-        pos = gvdrive.getPosition("LW"); // unit: rad
-
-        // Velocity Control
-        gvdrive.setTargetVelocity("LW", 100); // unit: rad/s
-        vel = gvdrive.getVelocity("LW"); // unit: rad/s
-
         // Torque Control
-        gvdrive.setTargetTorque("LW", 100);  // unit: Nm
-        tor = gvdrive.getTorque("LW"); // unit: Nm
+        gvdrive.setTargetTorque("TEST", 100);  // unit: Nm
         cnt++;
 
     }
     /*********** user code end *************/
 
 
-    std::this_thread::sleep_for(std::chrono::seconds(30));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     gvdrive.shutdown();
 
     return 0;

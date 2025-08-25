@@ -9,34 +9,6 @@
 
 namespace GVTerrain::robot {
   
-    // ---- SDO helpers ----
-  static int sdo_wr_u8(uint16 slave, uint16 idx, uint8 sub, uint8 val, const char* tag) {
-    int sz = 1;
-    int wkc = ec_SDOwrite(slave, idx, sub, FALSE, sz, &val, EC_TIMEOUTRXM);
-    printf("[SDO WR] %s -> %04X:%02X = %u (wkc=%d)\n", tag, idx, sub, (unsigned)val, wkc);
-    osal_usleep(5000); // 5ms 여유
-    return wkc;
-  }
-  static int sdo_rd_u8(uint16 slave, uint16 idx, uint8 sub, uint8 &out) {
-    int sz = 1;
-    int wkc = ec_SDOread(slave, idx, sub, FALSE, &sz, &out, EC_TIMEOUTRXM);
-    printf("[SDO RD] %04X:%02X (u8) -> wkc=%d val=%u\n", idx, sub, wkc, (unsigned)out);
-    return wkc;
-  }
-
-  // FreeRun 강제: SM2(0x1C32:01), SM3(0x1C33:01) = 0
-  static bool set_freerun_sync(uint16 slave) {
-    int w1 = sdo_wr_u8(slave, 0x1C32, 0x01, 0, "SM2 SyncType=FreeRun");
-    int w2 = sdo_wr_u8(slave, 0x1C33, 0x01, 0, "SM3 SyncType=FreeRun");
-
-    // 확인 차 다시 읽기
-    uint8 r1=255, r2=255;
-    sdo_rd_u8(slave, 0x1C32, 0x01, r1);
-    sdo_rd_u8(slave, 0x1C33, 0x01, r2);
-
-    return (w1 > 0 && w2 > 0);
-  }
-
 
   GVdrive::GVdrive(const std::string& interface, const std::string& config_path):selectedInterface(interface)
   {
@@ -221,38 +193,20 @@ namespace GVTerrain::robot {
   }
 
   bool GVdrive::startEthercat() {
-    ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE);
-    for (uint8_t s = 3; s <= ec_slavecount; ++s) {
-      if (!set_freerun_sync(s)) {
-        printf("[EC] set_freerun_sync(S%u) failed (계속 진행해서 맵만 구성해봄)\n", s);
-      }
-    }
-
-    if (ec_config_map(&IOmap_)<=0){
-      std::cerr << "[EC] ec_config_map failed" << std::endl;
-      return false;
-    }
-
-    osal_usleep(5000);
-    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE*8);
-
-    ec_readstate();
-    for (int i = 1; i <= ec_slavecount; ++i) {
-      printf("[EC] slave %d state=0x%02X AL=0x%04X\n",i, ec_slave[i].state, ec_slave[i].ALstatuscode);
-  }
-
+    ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
+    ec_config_overlap_map(&IOmap_);
+    ec_configdc();
+    ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 4);
+    
     ec_slave[0].state = EC_STATE_OPERATIONAL;
-    ec_send_processdata();
+    ec_send_overlap_processdata();
     ec_receive_processdata(EC_TIMEOUTRET);
     ec_writestate(0);
-
-
-
     //////////// wait for all slaves to reach OP state ////////////////////////////
     uint8_t count = 5;
     uint16_t timeout = 50000;
     do {
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       ec_statecheck(0, EC_STATE_OPERATIONAL, timeout);
     } while (count-- && (ec_slave[0].state != EC_STATE_OPERATIONAL));
@@ -267,12 +221,12 @@ namespace GVTerrain::robot {
     std::cout << "ec_slavecount : "<<ec_slavecount << std::endl;
 
 
-    for (uint8_t i = 3; i <= ec_slavecount; i++) {
+    for (uint8_t i = 1; i <= ec_slavecount; i++) {
       auto rx = reinterpret_cast<robot::RxPDO *>(ec_slave[i].outputs);
       rx->TargetPosition = 0;
       rx->TargetVelocity = 0;
       rx->TargetTorque = 0;
-      rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::FAULT_CLEAR & 0xFF);
+      rx->ControlWord = robot::CiA402CONTROLWORD::FAULT_CLEAR;
       rx->ModesofOperation = robot::OPMODE::PWM_DUTY_ZERO;
       rx->ImpedancePGain = 0;
       rx->ImpedanceDGain = 0;
@@ -293,7 +247,7 @@ namespace GVTerrain::robot {
     // Helper function to convert to binary string
     auto toBinaryString = [](int value) -> std::string {
       std::string binary;
-      for (int i = 3; i >= 0; i--) {  // Changed to 4 bits for integer
+      for (int i = 4; i >= 0; i--) {  // Changed to 4 bits for integer
         binary += (value & (1 << i)) ? '1' : '0';
         if (i % 4 == 0 && i != 0) {
           binary += ' ';                           // Add space every 4 bits
@@ -303,7 +257,7 @@ namespace GVTerrain::robot {
     };
     
     // First pass: record initial error codes
-    for (uint8_t i = 3; i <= ec_slavecount; i++) {
+    for (uint8_t i = 1; i <= ec_slavecount; i++) {
       auto tx = reinterpret_cast<robot::TxPDO *>(ec_slave[i].inputs);
       if (tx->ErrorCode != 0) {
         initialErrorCodes[i] = tx->ErrorCode;
@@ -318,16 +272,16 @@ namespace GVTerrain::robot {
     bool noErrorForAllSlaves;
     int faultClearCnt = 100;
     do {
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       noErrorForAllSlaves = true;
-      for (uint8_t i = 3; i <= ec_slavecount; i++) {
+      for (uint8_t i = 1; i <= ec_slavecount; i++) {
         auto tx = reinterpret_cast<robot::TxPDO *>(ec_slave[i].inputs);
         auto rx = reinterpret_cast<robot::RxPDO *>(ec_slave[i].outputs);
         rx->TargetPosition = 0;
         rx->TargetVelocity = 0;
         rx->TargetTorque = 0;
-        rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::FAULT_CLEAR & 0xFF);
+        rx->ControlWord = robot::CiA402CONTROLWORD::FAULT_CLEAR;
         rx->ModesofOperation = robot::OPMODE::PWM_DUTY_ZERO;
         rx->ImpedancePGain = 0;
         rx->ImpedanceDGain = 0;
@@ -348,7 +302,7 @@ namespace GVTerrain::robot {
     if (faultClearCnt == -1) {
       std::cerr << "not all faults cleared for all slaves." <<std::endl;
   
-      for (uint8_t i = 3; i <= ec_slavecount; i++) //here is 0819 test 4->3
+      for (uint8_t i = 1; i <= ec_slavecount; i++) //here is 0819 test 4->3
       {
         auto tx = reinterpret_cast<robot::TxPDO *>(ec_slave[i].inputs);
         if (tx->ErrorCode != 0) {
@@ -364,19 +318,19 @@ namespace GVTerrain::robot {
       std::cout << "all faults cleared for all slaves." <<std::endl;
     }
   
-    for (uint8_t i = 3; i <= ec_slavecount; i++) {
+    for (uint8_t i = 1; i <= ec_slavecount; i++) {
       auto rx = reinterpret_cast<robot::RxPDO *>(ec_slave[i].outputs);
       rx->TargetPosition = 0;
       rx->TargetVelocity = 0;
       rx->TargetTorque = 0;
-      rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::DISABLE_VOLTAGE & 0xFF);
+      rx->ControlWord = robot::CiA402CONTROLWORD::DISABLE_VOLTAGE;
       rx->ModesofOperation = robot::OPMODE::PWM_DUTY_ZERO;
       rx->ImpedancePGain = 0;
       rx->ImpedanceDGain = 0;
     }
 
     if(GVdrive::mode == CONTROL){
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
 
       if (workCount == (slaveCount-2) * 3) {
@@ -406,7 +360,7 @@ namespace GVTerrain::robot {
       etherCatThread=0;
     }
 
-    for (uint8_t i = 3; i <= ec_slavecount; ++i) {
+    for (uint8_t i = 1; i <= ec_slavecount; ++i) {
         auto rx = reinterpret_cast<robot::RxPDO *>(ec_slave[i].outputs);
         rx->TargetPosition = 0;
         rx->TargetVelocity = 0;
@@ -414,20 +368,20 @@ namespace GVTerrain::robot {
         rx->ImpedancePGain = 0;
         rx->ImpedanceDGain = 0;
         rx->ModesofOperation = robot::OPMODE::PWM_DUTY_ZERO;
-        rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::DISABLE_VOLTAGE & 0xFF);
+        rx->ControlWord = robot::CiA402CONTROLWORD::DISABLE_VOLTAGE;
       }
     
     bool slave_state = false;
     const int max_stop_iter = 100;
     uint8_t stop_cnt = 0; 
     while ( !slave_state && stop_cnt < max_stop_iter) {
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       ec_receive_processdata(EC_TIMEOUTRET);
       slave_state = true;
-      for (uint8_t i = 3; i <= ec_slavecount; ++i) {
+      for (uint8_t i = 1; i <= ec_slavecount; ++i) {
         auto tx = reinterpret_cast<robot::TxPDO *>(ec_slave[i].inputs);
         if (!tx) continue;
-        if ( (tx->Statusword & 0x006F) != 0x0040 ) {
+        if ( (tx->Statusword & 0x6F) != 0x40 ) {
           slave_state = false;
           break;
         }
@@ -516,7 +470,7 @@ namespace GVTerrain::robot {
       rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_TORQUE;
       rx->TargetPosition = 0.0;
       rx->TargetVelocity = 0.0;
-      rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xff);
+      rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
 
       {
         std::lock_guard guard(driveMutex);
@@ -527,11 +481,11 @@ namespace GVTerrain::robot {
     }
 
     {
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
             
       if (workCount == (slaveCount-2) * 3) {
-        for(int i=3;i<=slaveCount;i++){
+        for(int i=1;i<=slaveCount;i++){
           std::lock_guard guard(driveMutex);
           auto tx = reinterpret_cast<robot::TxPDO *>(ec_slave[i].inputs);
           long double rad = tx->PositionActualValue*Convert::unitToJointPos;
@@ -549,7 +503,7 @@ namespace GVTerrain::robot {
       switch (motor.control_mode){
         case TORQUE:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_TORQUE;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -559,7 +513,7 @@ namespace GVTerrain::robot {
           break;
         case IMPEDANCE:
           rx->ModesofOperation = robot::OPMODE::IMPEDANCE_CONTROL;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -569,7 +523,7 @@ namespace GVTerrain::robot {
           break;
         case VELOCITY:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_VELOCITY;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetTorque = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -579,7 +533,7 @@ namespace GVTerrain::robot {
           break;
         case POSITION:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_POSITION;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -590,7 +544,7 @@ namespace GVTerrain::robot {
 
         case TORQUE_M:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_TORQUE;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -600,7 +554,7 @@ namespace GVTerrain::robot {
           break;
         case IMPEDANCE_M:
           rx->ModesofOperation = robot::OPMODE::IMPEDANCE_CONTROL;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -610,7 +564,7 @@ namespace GVTerrain::robot {
           break;
         case VELOCITY_M:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_VELOCITY;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetTorque = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -620,7 +574,7 @@ namespace GVTerrain::robot {
           break;
         case POSITION_M:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_POSITION;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -631,7 +585,7 @@ namespace GVTerrain::robot {
 
         case TORQUE_HM:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_TORQUE;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -641,7 +595,7 @@ namespace GVTerrain::robot {
           break;
         case IMPEDANCE_HM:
           rx->ModesofOperation = robot::OPMODE::IMPEDANCE_CONTROL;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -651,7 +605,7 @@ namespace GVTerrain::robot {
           break;
         case VELOCITY_HM:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_VELOCITY;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetTorque = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -661,7 +615,7 @@ namespace GVTerrain::robot {
           break;
         case POSITION_HM:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_POSITION;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -672,7 +626,7 @@ namespace GVTerrain::robot {
 
         case TORQUE_S:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_TORQUE;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -682,7 +636,7 @@ namespace GVTerrain::robot {
           break;
         case IMPEDANCE_S:
           rx->ModesofOperation = robot::OPMODE::IMPEDANCE_CONTROL;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -692,7 +646,7 @@ namespace GVTerrain::robot {
           break;
         case VELOCITY_S:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_VELOCITY;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetTorque = 0.0;
           rx->TargetPosition =0.0;
           {
@@ -702,7 +656,7 @@ namespace GVTerrain::robot {
           break;
         case POSITION_S:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_POSITION;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::ENABLE_OPERATION & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::ENABLE_OPERATION;
           rx->TargetVelocity = 0.0;
           rx->TargetTorque = 0.0;
           {
@@ -713,7 +667,7 @@ namespace GVTerrain::robot {
 
         default:
           rx->ModesofOperation = robot::OPMODE::CYCLIC_SYNC_POSITION;
-          rx->ControlWord = static_cast<uint8_t>(robot::CiA402CONTROLWORD::DISABLE_VOLTAGE & 0xFF);
+          rx->ControlWord = robot::CiA402CONTROLWORD::DISABLE_VOLTAGE;
           break;
       }
       
@@ -722,7 +676,7 @@ namespace GVTerrain::robot {
       }
 
     
-      ec_send_processdata();
+      ec_send_overlap_processdata();
       int workCount = ec_receive_processdata(EC_TIMEOUTRET);
 
     if (workCount == (slaveCount-2) * 3) {
