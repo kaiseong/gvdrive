@@ -166,6 +166,12 @@ enum UserMode
   CONTROL = 1
 };
 
+enum ConnectMode
+{
+  NOBOARD = 0,
+  RAIHUB = 1
+};
+
 enum ControlMode
 {
   POSITION = 0,//대형구동기
@@ -214,11 +220,12 @@ class GVdrive
 public:
   explicit GVdrive(const std::string& interface, const std::string& config_path);
   
-  ~GVdrive() { }
+  ~GVdrive();
 
   bool scan();
   bool con();
-  void setMode(UserMode new_mode);
+  void setControlMode(UserMode new_mode);
+  void setConnectMode(ConnectMode new_mode);
   // I/O
   void setTargetPosition(const std::string& motor_name, double position);
   void setTargetTorque(const std::string& motor_name, double torque);
@@ -230,7 +237,8 @@ public:
   void* loop(double frequency);
   bool startEthercat();
   bool shutdown();
-
+  
+protected:
   static void* loopFunc(void* arg);
 
   pthread_t etherCatThread; 
@@ -243,19 +251,19 @@ public:
   uint8_t loop_cnt = 0;
 
   /// ethercat
-  int slaveCount = 0;
   char IOmap_[4096];
   bool ready = false;
+
+  uint8_t start_cnt=3;
   std::atomic_bool runEtherCatLoop = true;
-  
   std::vector<Motor> motors;
   std::map<std::string, int> motor_map_;
 
   robot::OPMODE ModesofOperation;
   robot::CiA402CONTROLWORD controlWord = robot::CiA402CONTROLWORD::DISABLE_VOLTAGE;
-  UserMode mode;
+  UserMode control_mode;
+  ConnectMode connect_mode;
   uint32_t clock_count=0;
-protected:
   double loopFrequency=1000.0;
   double initialposition=0.0;
   void control();
